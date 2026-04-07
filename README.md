@@ -3,4 +3,4 @@ This project proposes a hybrid control workflow for a two-wheeled self-balancing
 
 Overleaf Doc:- https://www.overleaf.com/project/696f208bb2a333fcd4b61b7c
 
-![Demo](demo.gif)
+![Demo](self_balancing_robot-ezgif.com-crop.gif)
