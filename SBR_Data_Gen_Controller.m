@@ -87,11 +87,11 @@ x0 = [0;
 
 %% =========================================
 % TEMPORARY STABILIZING FEEDBACK FOR SAFE DATA COLLECTION
-% u = -Ktemp*x + excitation
+% u = Ktemp*x + excitation
 % =========================================
-Ktemp = [-1.0  -2.0  18.0  3.5];
+Ktemp = [1.0  2.0  -18.0  -3.5];
 
-Acl_temp = Ad - Bd*Ktemp;
+Acl_temp = Ad + Bd*Ktemp;
 
 disp('========= DATA COLLECTION CLOSED-LOOP EIGS ========');
 disp(eig(Acl_temp));
@@ -120,7 +120,7 @@ x(:,1) = x0;
 % SIMULATE DATA COLLECTION
 % =========================================
 for k = 1:T
-    u(:,k) = -Ktemp * x(:,k) + u_exc(k);
+    u(:,k) = Ktemp * x(:,k) + u_exc(k);
     y(:,k) = Cd * x(:,k) + Dd * u(:,k);
     x(:,k+1) = Ad * x(:,k) + Bd * u(:,k);
 end
@@ -160,6 +160,27 @@ else
 end
 
 %% =========================================
+% SAVE DATA MATRICES FOR PURE DATA-DRIVEN CONTROLLER
+% =========================================
+% These matrices will be used in the pure data-driven controller script.
+% The next controller file should load this .mat file and use X0, X1, U0
+% directly, without using A_est, B_est, Ad, or Bd.
+
+data_file_name = 'SBR_Data_Matrices.mat';
+
+save(data_file_name, ...
+    'X0', 'X1', 'U0', ...
+    'Y0', 'Y1', ...
+    'Ts', ...
+    'n', 'm', 'p', ...
+    'x0', ...
+    'Ktemp', ...
+    'u_exc');
+
+disp('================ DATA SAVED ======================');
+fprintf('Saved data matrices to: %s\n', data_file_name);
+disp('This file can now be used for pure data-driven controller design.');
+%% =========================================
 % RECOVER MODEL FROM DATA
 % X1 = [B A] * [U0; X0]
 % =========================================
@@ -189,7 +210,8 @@ disp('================ CONTROLLER DESIGN ===============');
 
 if exist('dlqr','file') == 2
     disp('Using dlqr from Control System Toolbox...');
-    K_lqr = dlqr(A_est, B_est, Q_lqr, R_lqr);
+    K_lqr_neg = dlqr(A_est, B_est, Q_lqr, R_lqr);
+    K_lqr = -K_lqr_neg;   % convert to u = Kx
 else
     disp('dlqr not found. Using iterative Riccati solution...');
 
@@ -261,7 +283,7 @@ for i = 1:length(b_values)
         Ad_test = Md_test(1:n,1:n);
         Bd_test = Md_test(1:n,n+1:n+m);
 
-        Acl_test = Ad_test - Bd_test*K_lqr;
+        Acl_test = Ad_test + Bd_test*K_lqr;
         eig_test = eig(Acl_test);
 
         fprintf('\n--- Test Case ---\n');
@@ -274,7 +296,7 @@ for i = 1:length(b_values)
         x_sim(:,1) = [0;0;deg2rad(45);0];
 
         for k = 1:300
-            u_sim = -K_lqr * x_sim(:,k);
+            u_sim = K_lqr * x_sim(:,k);
             x_sim(:,k+1) = Ad_test * x_sim(:,k) + Bd_test * u_sim;
         end
 
@@ -284,12 +306,12 @@ end
 
 %% =========================================
 % CLOSED-LOOP STABILITY CHECK
-% Standard convention: u = -K*x
+% Standard convention: u = K*x
 % =========================================
-Acl = A_est - B_est*K_lqr;
+Acl = A_est + B_est*K_lqr;
 
 disp('============ CLOSED-LOOP STABILITY CHECK =========');
-disp('Acl = A_est - B_est*K_lqr:');
+disp('Acl = A_est + B_est*K_lqr:');
 disp(Acl);
 
 cl_eigs = eig(Acl);
@@ -307,34 +329,46 @@ end
 % OPTIONAL COMPARISON WITH TRUE DISCRETE MODEL
 % =========================================
 disp('======== EIGENVALUES USING TRUE DISCRETE MODEL ========');
-disp('eig(Ad - Bd*K_lqr):');
-disp(eig(Ad - Bd*K_lqr));
+disp('eig(Ad + Bd*K_lqr):');
+disp(eig(Ad + Bd*K_lqr));
 
 %% =========================================
-% SIMPLE NUMERICAL RESPONSE CHECK
-% NO PLOTS, ONLY FINAL VALUES
+% CLOSED-LOOP TEST SIMULATION
 % =========================================
 Ntest = 1000;
+u_sat_limit = 20;
 
 x_test = zeros(n, Ntest+1);
 u_test = zeros(m, Ntest);
+u_cmd_test = zeros(m, Ntest);
 
+% Initial condition (45 deg tilt)
 x_test(:,1) = [0;
                0;
                deg2rad(45);
                0];
 
 for k = 1:Ntest
-    u_test(:,k) = -K_lqr * x_test(:,k);
-    x_test(:,k+1) = A_est * x_test(:,k) + B_est * u_test(:,k);
+    % Raw control
+    u_cmd = K_lqr * x_test(:,k);
+
+    % Saturation (real actuator)
+    u_sat = max(min(u_cmd, u_sat_limit), -u_sat_limit);
+
+    % Store
+    u_cmd_test(:,k) = u_cmd;
+    u_test(:,k) = u_sat;
+
+    % System update
+    x_test(:,k+1) = A_est * x_test(:,k) + B_est * u_sat;
 end
 
 disp('================ TEST RESPONSE ===================');
 fprintf('Initial angle (deg) = %.4f\n', rad2deg(x_test(3,1)));
 fprintf('Final angle (deg)   = %.6f\n', rad2deg(x_test(3,end)));
 fprintf('Final state norm    = %.6e\n', norm(x_test(:,end)));
-fprintf('Max |u| during test = %.6f\n', max(abs(u_test(:))));
-
+fprintf('Max |u_cmd|         = %.6f\n', max(abs(u_cmd_test(:))));
+fprintf('Max |u_sat|         = %.6f\n', max(abs(u_test(:))));
 %% =========================================
 % SAVE EVERYTHING
 % =========================================
@@ -350,6 +384,29 @@ save('SBR_DataDriven_AllInOne_Result.mat', ...
 
 disp('================ FINISHED ========================');
 disp('Saved results to SBR_DataDriven_AllInOne_Result.mat');
+
+%% =========================================
+% PLOTS: BODY ANGLE + CONTROL INPUT
+% =========================================
+
+t_state = 0:Ts:Ntest*Ts;
+t_input = 0:Ts:(Ntest-1)*Ts;
+
+figure;
+plot(t_state, rad2deg(x_test(3,:)), 'LineWidth', 2);
+grid on;
+xlabel('Time (s)');
+ylabel('\phi (deg)');
+title('Body Angle Response');
+
+figure;
+plot(t_input, u_cmd_test, '--', 'LineWidth', 1.2); hold on;
+plot(t_input, u_test, 'LineWidth', 2);
+grid on;
+xlabel('Time (s)');
+ylabel('Control Input');
+legend('u command','u saturated','Location','best');
+title('Control Input Response');
 
 %% =========================================
 % SAFE VIDEO GENERATION (WILL WORK)
