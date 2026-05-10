@@ -7,15 +7,10 @@ close all;
 % DATA GENERATION + DATA-BASED MODEL RECOVERY
 % + REALISTIC DISSIPATIVITY-BASED CONTROLLER DESIGN
 % =========================================
-%
-% REQUIREMENTS:
-%   - YALMIP installed
-%   - SDP solver installed (SDPT3 / SeDuMi / MOSEK)
-%
 % Closed-loop convention:
-%   u(k) = -K_diss * x(k)
+%   u(k) = K_diss * x(k)
 %   x(k+1) = A x(k) + B u(k)
-%          = (A - B*K_diss)x(k)
+%          = (A + B*K_diss)x(k)
 %
 % This version adds:
 %   1) control regularization
@@ -104,11 +99,11 @@ x0 = [0;
 
 %% =========================================
 % TEMPORARY STABILIZING FEEDBACK FOR SAFE DATA COLLECTION
-% u = -Ktemp*x + excitation
+% u = Ktemp*x + excitation
 % =========================================
-Ktemp = [-1.0  -2.0  18.0  3.5];
+Ktemp = [1.0  2.0  -18.0  -3.5];
 
-Acl_temp = Ad - Bd*Ktemp;
+Acl_temp = Ad + Bd*Ktemp;
 
 disp('========= DATA COLLECTION CLOSED-LOOP EIGS ========');
 disp(eig(Acl_temp));
@@ -116,8 +111,8 @@ disp(eig(Acl_temp));
 %% =========================================
 % PERSISTENTLY EXCITING INPUT
 % =========================================
-u_amp = 0.15;
-hold_steps = 8;
+u_amp = 0.3;
+hold_steps = 4;
 
 num_blocks = ceil(T/hold_steps);
 u_blocks = u_amp * sign(randn(1,num_blocks));
@@ -137,7 +132,7 @@ x(:,1) = x0;
 % SIMULATE DATA COLLECTION
 % =========================================
 for k = 1:T
-    u(:,k) = -Ktemp * x(:,k) + u_exc(k);
+    u(:,k) = Ktemp * x(:,k) + u_exc(k);
     y(:,k) = Cd * x(:,k) + Dd * u(:,k);
     x(:,k+1) = Ad * x(:,k) + Bd * u(:,k);
 end
@@ -175,6 +170,18 @@ if rank_data < required_rank
 else
     disp('Data matrix has full rank. Good for data-driven control.');
 end
+%% =========================================
+% SAVE DATA MATRICES FOR PURE DATA-DRIVEN CONTROLLER
+% =========================================
+save('SBR_Dissipative_Data_Matrices.mat', ...
+    'X0','X1','U0','Y0','Y1', ...
+    'Ts','n','m','p', ...
+    'rank_data','required_rank');
+
+disp('==================================================');
+disp('Saved data matrices to SBR_Dissipative_Data_Matrices.mat');
+disp('This file can be used for pure data-driven controller design.');
+disp('==================================================');
 
 %% =========================================
 % RECOVER MODEL FROM DATA
@@ -200,10 +207,6 @@ fprintf('||B_est - Bd|| = %g\n', norm(B_est - Bd));
 % =========================================
 disp('====== SDPT3-FRIENDLY DISSIPATIVITY CONTROLLER ======');
 
-if ~exist('sdpvar','file')
-    error(['YALMIP not found. Install YALMIP and SDPT3.']);
-end
-
 % Disturbance matrix (smaller = less conservative)
 Ew = 0.05 * eye(n);
 nw = size(Ew,2);
@@ -218,7 +221,7 @@ L = sdpvar(m,n,'full');
 gamma = sdpvar(1,1);
 
 % Closed-loop term for u = -Kx
-AclX = A_est*X - B_est*L;
+AclX = A_est*X + B_est*L;
 
 % Discrete-time bounded-real LMI
 BRL = [ X,            AclX,         Ew,               zeros(n,nz);
@@ -258,10 +261,10 @@ fprintf('Optimal gamma = %.6f\n', gamma_val);
 %% =========================================
 % CLOSED-LOOP STABILITY CHECK
 % =========================================
-Acl = A_est - B_est*K_diss;
+Acl = A_est + B_est*K_diss;
 
 disp('============ CLOSED-LOOP STABILITY CHECK =========');
-disp('Acl = A_est - B_est*K_diss:');
+disp('Acl = A_est + B_est*K_diss:');
 disp(Acl);
 
 cl_eigs = eig(Acl);
@@ -279,8 +282,8 @@ end
 % OPTIONAL COMPARISON WITH TRUE DISCRETE MODEL
 % =========================================
 disp('======== EIGENVALUES USING TRUE DISCRETE MODEL ========');
-disp('eig(Ad - Bd*K_diss):');
-disp(eig(Ad - Bd*K_diss));
+disp('eig(Ad + Bd*K_diss):');
+disp(eig(Ad + Bd*K_diss));
 
 %% =========================================
 % ROBUSTNESS TEST (±10% variation in b and I)
@@ -321,7 +324,7 @@ for i = 1:length(b_values)
         Ad_test = Md_test(1:n,1:n);
         Bd_test = Md_test(1:n,n+1:n+m);
 
-        Acl_test = Ad_test - Bd_test*K_diss;
+        Acl_test = Ad_test + Bd_test*K_diss;
         eig_test = eig(Acl_test);
 
         fprintf('\n--- Test Case ---\n');
@@ -335,7 +338,7 @@ for i = 1:length(b_values)
         u_sim_hist = zeros(m,1000);
 
         for k = 1:300
-            u_cmd = -K_diss * x_sim(:,k);
+            u_cmd = K_diss * x_sim(:,k);
             u_sat = max(min(u_cmd, u_sat_limit), -u_sat_limit);
             u_sim_hist(:,k) = u_sat;
             x_sim(:,k+1) = Ad_test * x_sim(:,k) + Bd_test * u_sat;
@@ -362,7 +365,7 @@ x_test(:,1) = [0;
                0];
 
 for k = 1:Ntest
-    u_cmd = -K_diss * x_test(:,k);
+    u_cmd = K_diss * x_test(:,k);
     u_sat = max(min(u_cmd, u_sat_limit), -u_sat_limit);
 
     u_cmd_test(:,k) = u_cmd;
