@@ -5,7 +5,6 @@ close all;
 %% =========================================
 % SELF-BALANCING ROBOT
 % MODEL-BASED DISSIPATIVITY CONTROLLER
-% + DATA GENERATION FOR DATA-DRIVEN / DATA-ASSISTED CONTROLLERS
 % + DISTURBANCE VALIDATION (-20 deg, -80 deg/s at 10 s)
 % =========================================
 %
@@ -13,9 +12,8 @@ close all;
 %   Model-Based Controller with Dissipativity
 %
 % IMPORTANT:
-%   This script GENERATES and SAVES data matrices for later scripts.
-%   This script does NOT use those data matrices for its own controller design.
-%   This script does NOT recover A_est or B_est for controller design.
+%   This script does NOT use data matrices.
+%   This script does NOT recover A_est or B_est from data.
 %   The dissipativity controller is designed directly from Ad and Bd.
 %
 % REQUIREMENTS:
@@ -23,9 +21,9 @@ close all;
 %   - SDP solver installed (SDPT3 / SeDuMi / MOSEK)
 %
 % Closed-loop convention:
-%   u(k) = K_diss * x(k)
+%   u(k) = -K_diss * x(k)
 %   x(k+1) = Ad*x(k) + Bd*u(k)
-%          = (Ad + Bd*K_diss)*x(k)
+%          = (Ad - Bd*K_diss)*x(k)
 
 %% =========================================
 % PHYSICAL PARAMETERS
@@ -34,7 +32,7 @@ M = 0.5;         % chassis mass
 m_body = 0.2;    % body mass
 l = 0.3;         % COM distance
 I = 0.006;       % body inertia
-b = 0.1;         % viscous friction 0.8
+b = 0.1;         % viscous friction
 g = 9.81;        % gravity
 
 %% =========================================
@@ -95,100 +93,6 @@ disp('Bd matrix:');
 disp(Bd);
 
 %% =========================================
-% DATA GENERATION FOR DATA-DRIVEN / DATA-ASSISTED CONTROLLERS
-% =========================================
-% Purpose:
-%   Generate rich input-state data matrices:
-%       X0 = [x(0) ... x(T-1)]
-%       X1 = [x(1) ... x(T)]
-%       U0 = [u(0) ... u(T-1)]
-%       Y0 = [y(0) ... y(T-1)]
-%       Y1 = [y(1) ... y(T)]
-%
-% Important:
-%   These matrices are saved for other scripts.
-%   They are NOT used below to design K_diss.
-
-Tdata = 1000;
-
-x0_data = [0;
-           0;
-           deg2rad(45);
-           0];
-
-% Temporary stabilizing feedback only for safe data collection
-% This is NOT the final dissipativity controller.
-% Convention here is u = Ktemp*x + excitation.
-Ktemp = [1.0  2.0  -18.0  -3.5];
-Acl_temp = Ad + Bd*Ktemp;
-
-disp('========= DATA COLLECTION CLOSED-LOOP EIGS ========');
-disp(eig(Acl_temp));
-
-% Persistently exciting input
-u_amp = 0.15;
-hold_steps = 8;
-num_blocks = ceil(Tdata/hold_steps);
-u_blocks = u_amp * sign(randn(1,num_blocks));
-u_exc = repelem(u_blocks, hold_steps);
-u_exc = u_exc(1:Tdata);
-
-% Storage
-x_data = zeros(n, Tdata+1);
-y_data = zeros(p, Tdata);
-u_data = zeros(m, Tdata);
-
-x_data(:,1) = x0_data;
-
-% Simulate data collection using the known model Ad, Bd
-for k = 1:Tdata
-    u_data(:,k) = Ktemp * x_data(:,k) + u_exc(k);
-    y_data(:,k) = Cd * x_data(:,k) + Dd * u_data(:,k);
-    x_data(:,k+1) = Ad * x_data(:,k) + Bd * u_data(:,k);
-end
-
-% Build data matrices
-X0 = x_data(:,1:Tdata);
-X1 = x_data(:,2:Tdata+1);
-U0 = u_data(:,1:Tdata);
-Y0 = y_data(:,1:Tdata);
-
-Y1 = zeros(p,Tdata);
-Y1(:,1:Tdata-1) = y_data(:,2:Tdata);
-Y1(:,Tdata) = Cd*x_data(:,Tdata+1) + Dd*u_data(:,Tdata);
-
-disp('================ DATA MATRIX SIZES ===============');
-fprintf('size(X0) = [%d %d]\n', size(X0,1), size(X0,2));
-fprintf('size(X1) = [%d %d]\n', size(X1,1), size(X1,2));
-fprintf('size(U0) = [%d %d]\n', size(U0,1), size(U0,2));
-fprintf('size(Y0) = [%d %d]\n', size(Y0,1), size(Y0,2));
-fprintf('size(Y1) = [%d %d]\n', size(Y1,1), size(Y1,2));
-
-rank_data = rank([U0; X0]);
-required_rank = n + m;
-
-disp('================ DATA RANK CHECK =================');
-fprintf('rank([U0; X0]) = %d\n', rank_data);
-fprintf('required rank  = %d\n', required_rank);
-
-if rank_data < required_rank
-    warning('Generated data is NOT rich enough. Increase Tdata/u_amp or change excitation.');
-else
-    disp('Generated data is rich enough for data-driven / data-assisted control.');
-end
-
-% Save data for both future approaches:
-%   Data-driven: uses X0, X1, U0 directly.
-%   Data-assisted: can recover A_est, B_est from X1 = [B A]*[U0; X0].
-save('SBR_Dissipative_Data_Matrices.mat', ...
-    'X0','X1','U0','Y0','Y1', ...
-    'x_data','y_data','u_data','u_exc','Ktemp','Tdata','Ts', ...
-    'Ad','Bd','Cd','Dd','A','B','C','D', ...
-    'M','m_body','l','I','b','g','a','c','d','Delta');
-
-disp('Saved generated data to SBR_Data_Matrices.mat');
-
-%% =========================================
 % MODEL-BASED DISSIPATIVITY CONTROLLER DESIGN
 % =========================================
 disp('====== MODEL-BASED DISSIPATIVITY CONTROLLER ======');
@@ -210,9 +114,9 @@ X = sdpvar(n,n,'symmetric');
 L = sdpvar(m,n,'full');
 gamma = sdpvar(1,1);
 
-% Closed-loop term for u = Kx
+% Closed-loop term for u = -Kx
 % MODEL-BASED: uses Ad and Bd directly
-AclX = Ad*X + Bd*L;
+AclX = Ad*X - Bd*L;
 
 % Discrete-time bounded-real / dissipativity-style LMI
 BRL = [ X,            AclX,         Ew,               zeros(n,nz);
@@ -251,10 +155,11 @@ fprintf('Optimal gamma = %.6f\n', gamma_val);
 %% =========================================
 % CLOSED-LOOP STABILITY CHECK
 % =========================================
-Acl = Ad + Bd*K_diss;
+Acl = Ad - Bd*K_diss;
+
 
 disp('============ CLOSED-LOOP STABILITY CHECK =========');
-disp('Acl = Ad + Bd*K_diss:');
+disp('Acl = Ad - Bd*K_diss:');
 disp(Acl);
 
 cl_eigs = eig(Acl);
@@ -307,7 +212,7 @@ for i = 1:length(b_values)
         Ad_test = Md_test(1:n,1:n);
         Bd_test = Md_test(1:n,n+1:n+m);
 
-        Acl_test = Ad_test + Bd_test*K_diss;
+        Acl_test = Ad_test - Bd_test*K_diss;
         eig_test = eig(Acl_test);
 
         fprintf('\n--- Test Case ---\n');
@@ -321,7 +226,7 @@ for i = 1:length(b_values)
         u_sim_hist = zeros(m,1000);
 
         for k = 1:300
-            u_cmd = K_diss * x_sim(:,k);
+            u_cmd = -K_diss * x_sim(:,k);
             u_sat = max(min(u_cmd, u_sat_limit), -u_sat_limit);
             u_sim_hist(:,k) = u_sat;
             x_sim(:,k+1) = Ad_test * x_sim(:,k) + Bd_test * u_sat;
@@ -342,8 +247,8 @@ u_sat_limit = 20;
 
 disturbance_time = 10;     % seconds
 dist_step = round(disturbance_time/Ts) + 1;
-dist_angle_deg = -20;      % body angle disturbance
-dist_angvel_deg = -80;     % angular velocity disturbance
+dist_angle_deg = -20;     % body angle disturbance
+dist_angvel_deg = -80;    % angular velocity disturbance
 angle_threshold_deg = 1;   % recovery threshold for body angle
 
 x_test = zeros(n, Ntest+1);
@@ -356,7 +261,7 @@ x_test(:,1) = [0;
                0];
 
 for k = 1:Ntest
-    u_cmd = K_diss * x_test(:,k);
+    u_cmd = -K_diss * x_test(:,k);
     u_sat = max(min(u_cmd, u_sat_limit), -u_sat_limit);
 
     u_cmd_test(:,k) = u_cmd;
@@ -400,54 +305,77 @@ fprintf('Max |u_cmd|                         = %.6f\n', max(abs(u_cmd_test(:))))
 fprintf('Max |u_sat|                         = %.6f\n', max(abs(u_test(:))));
 
 %% =========================================
-% PLOTS
+% PLOTS: ALL STATES + CONTROL INPUT
 % =========================================
 
-t = 0:Ts:Ntest*Ts;
+t_state = 0:Ts:Ntest*Ts;
 t_input = 0:Ts:(Ntest-1)*Ts;
 
-figure('Name','Model-Based Dissipative Robot Position');
-plot(t, x_test(1,:), 'LineWidth', 2);
-xline(disturbance_time, '--r', 'Disturbance');
+plot_folder = 'Model_Based_Dissipative_Controller_Disturbance_Plots';
+if ~exist(plot_folder,'dir')
+    mkdir(plot_folder);
+end
+
+% 1) Robot / Cart Position
+fig1 = figure('Name','Model-Based Dissipative Robot Position');
+plot(t_state, x_test(1,:), 'LineWidth', 2);
+hold on;
+xline(disturbance_time, '--', 'Disturbance', 'LineWidth', 1.2);
 grid on;
 xlabel('Time (s)');
 ylabel('x (m)');
-title('Model-Based Dissipativity Controller: Robot Position');
+title('Model-Based Dissipativity Controller: Robot / Cart Position');
+exportgraphics(fig1, fullfile(plot_folder,'01_robot_position.png'), 'Resolution', 300);
 
-figure('Name','Model-Based Dissipative Linear Velocity');
-plot(t, x_test(2,:), 'LineWidth', 2);
-xline(disturbance_time, '--r', 'Disturbance');
+% 2) Linear Velocity
+fig2 = figure('Name','Model-Based Dissipative Linear Velocity');
+plot(t_state, x_test(2,:), 'LineWidth', 2);
+hold on;
+xline(disturbance_time, '--', 'Disturbance', 'LineWidth', 1.2);
 grid on;
 xlabel('Time (s)');
 ylabel('xdot (m/s)');
 title('Model-Based Dissipativity Controller: Linear Velocity');
+exportgraphics(fig2, fullfile(plot_folder,'02_linear_velocity.png'), 'Resolution', 300);
 
-figure('Name','Model-Based Dissipative Body Angle');
-plot(t, rad2deg(x_test(3,:)), 'LineWidth', 2);
+% 3) Body Angle
+fig3 = figure('Name','Model-Based Dissipative Body Angle With Disturbance');
+plot(t_state, rad2deg(x_test(3,:)), 'LineWidth', 2);
 hold on;
-xline(disturbance_time, '--r', 'Disturbance');
-yline(angle_threshold_deg, '--k', '+1 deg');
-yline(-angle_threshold_deg, '--k', '-1 deg');
+xline(disturbance_time, '--', 'Disturbance', 'LineWidth', 1.2);
+yline(angle_threshold_deg, ':', '+1 deg');
+yline(-angle_threshold_deg, ':', '-1 deg');
 grid on;
 xlabel('Time (s)');
 ylabel('\phi (deg)');
-title('Model-Based Dissipativity Controller: Body Angle with Disturbance');
+title('Model-Based Dissipativity Controller: Body Angle Response With Disturbance');
+exportgraphics(fig3, fullfile(plot_folder,'03_body_angle.png'), 'Resolution', 300);
 
-figure('Name','Model-Based Dissipative Angular Velocity');
-plot(t, rad2deg(x_test(4,:)), 'LineWidth', 2);
-xline(disturbance_time, '--r', 'Disturbance');
+% 4) Angular Velocity
+fig4 = figure('Name','Model-Based Dissipative Angular Velocity');
+plot(t_state, rad2deg(x_test(4,:)), 'LineWidth', 2);
+hold on;
+xline(disturbance_time, '--', 'Disturbance', 'LineWidth', 1.2);
 grid on;
 xlabel('Time (s)');
 ylabel('\phidot (deg/s)');
 title('Model-Based Dissipativity Controller: Angular Velocity');
+exportgraphics(fig4, fullfile(plot_folder,'04_angular_velocity.png'), 'Resolution', 300);
 
-figure('Name','Model-Based Dissipative Control Input');
+% 5) Control Input
+fig5 = figure('Name','Model-Based Dissipative Control Input');
+plot(t_input, u_cmd_test, '--', 'LineWidth', 1.2);
+hold on;
 plot(t_input, u_test, 'LineWidth', 2);
-xline(disturbance_time, '--r', 'Disturbance');
+xline(disturbance_time, '--', 'Disturbance', 'LineWidth', 1.2);
 grid on;
 xlabel('Time (s)');
-ylabel('Control input u');
-title('Model-Based Dissipativity Controller: Control Input');
+ylabel('Control Input');
+legend('u command','u saturated','Location','best');
+title('Model-Based Dissipativity Controller: Control Input Response');
+exportgraphics(fig5, fullfile(plot_folder,'05_control_input.png'), 'Resolution', 300);
+
+fprintf('Saved disturbance plots to folder: %s\n', plot_folder);
 
 %% =========================================
 % SAVE EVERYTHING
@@ -455,46 +383,38 @@ title('Model-Based Dissipativity Controller: Control Input');
 save('SBR_ModelBased_Dissipativity_Controller_Disturbance_Result.mat', ...
     'A','B','C','D', ...
     'Ad','Bd','Cd','Dd', ...
-    'X0','X1','U0','Y0','Y1','x_data','y_data','u_data','u_exc','Ktemp','Tdata','rank_data','required_rank', ...
     'K_diss', ...
     'Acl','cl_eigs', ...
     'x_test','u_test','u_cmd_test', ...
     'disturbance_time','dist_step','dist_angle_deg','dist_angvel_deg', ...
-    'angle_threshold_deg','recovery_time', ...
+    'angle_threshold_deg','recovery_time','plot_folder', ...
     'Ts','M','m_body','l','I','b','g','a','c','d','Delta', ...
     'Ew','Cz','gamma_val','u_sat_limit');
 
 disp('================ FINISHED ========================');
 disp('Saved results to SBR_ModelBased_Dissipativity_Controller_Disturbance_Result.mat');
-disp('Plot export and animation/video generation are disabled.');
 
 %% =========================================
-% SHOW + SAVE DATA-DRIVEN ROBOT ANIMATION
+% SMOOTHER VIDEO GENERATION
 % =========================================
-disp('========== GENERATING AND SAVING ANIMATION ==========');
-
 opengl software
 
-video_name = 'model_based_dissipativity_robot_animation.mp4';
-
+video_name = 'self_balancing_robot_model_based_dissipativity_disturbance.mp4';
 v = VideoWriter(video_name,'MPEG-4');
-v.FrameRate = 10;
+v.FrameRate = 100;
 open(v);
 
-fig = figure('Name','Model-Based Dissipativity Robot Animation', 'Visible','on');
+fig = figure('Visible','on', 'Position', [100 100 900 600]);
 
 wheel_radius = 0.05;
 body_length = 0.5;
 
 frame_count = 0;
 
-for k = 1:10:length(x_test)
+for k = 1:length(x_test)
 
-    clf(fig);
-    hold on;
-    grid on;
+    clf(fig); hold on; grid on;
     axis equal;
-
     xlim([-1 1]);
     ylim([-0.1 1]);
 
@@ -511,37 +431,28 @@ for k = 1:10:length(x_test)
     plot([-5 5],[0 0],'k','LineWidth',2);
 
     % Wheel
-    theta = linspace(0,2*pi,60);
-    plot(wheel_x + wheel_radius*cos(theta), ...
-         wheel_y + wheel_radius*sin(theta), ...
-         'b','LineWidth',2);
+    th = linspace(0,2*pi,60);
+    plot(wheel_x + wheel_radius*cos(th), ...
+         wheel_y + wheel_radius*sin(th), 'b','LineWidth',2);
 
     % Body
-    plot([wheel_x body_x], [wheel_y body_y], ...
-         'r','LineWidth',4);
+    plot([wheel_x body_x], [wheel_y body_y], 'r','LineWidth',4);
 
     % COM
     plot(body_x, body_y, 'ko','MarkerFaceColor','k');
 
-    current_time = (k-1)*Ts;
-
-    if abs(current_time - disturbance_time) < 0.05
-        title_text = sprintf('DISTURBANCE APPLIED | Time = %.2f s | Angle = %.2f deg', ...
-                             current_time, rad2deg(phi));
-    else
-        title_text = sprintf('Time = %.2f s | Angle = %.2f deg', ...
-                             current_time, rad2deg(phi));
+    sim_time = (k-1)*Ts;
+    if abs(sim_time - disturbance_time) < Ts/2
+        plot(wheel_x, wheel_y + 0.18, 'rv', 'MarkerFaceColor','r', 'MarkerSize',8);
     end
 
-    title(title_text);
-
+    title(sprintf('Model-Based Dissipativity Controller | t = %.2f s | Angle = %.2f deg', sim_time, rad2deg(phi)));
     xlabel('Position x (m)');
     ylabel('Height (m)');
 
     drawnow;
 
     frame = getframe(fig);
-
     if ~isempty(frame.cdata)
         writeVideo(v, frame);
         frame_count = frame_count + 1;
@@ -551,10 +462,11 @@ end
 close(v);
 
 fprintf('Frames written: %d\n', frame_count);
+fprintf('Video frame rate: %d fps\n', 100);
 
 if frame_count > 0
-    disp('Animation saved successfully:');
+    disp('Video successfully saved!');
     disp(fullfile(pwd, video_name));
 else
-    warning('No frames captured.');
+    warning('No frames captured — video not created.');
 end
